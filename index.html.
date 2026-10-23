@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>School Bus Tracker</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+:root{--bg:#f3f4f7;--card:#fff;--ink:#1d2433;--muted:#667089;--bus:#f7b500;--ok:#17855a;--line:#dfe3ea}
+@media (prefers-color-scheme:dark){:root{--bg:#10151f;--card:#1a2130;--ink:#eaeef6;--muted:#9aa6bd;--line:#2a3347}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;flex-direction:column}
+header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--card);border-bottom:1px solid var(--line)}
+h1{font-size:1.05rem;margin:0}
+.tabs{display:flex;gap:6px}
+.tab{font:inherit;font-size:.9rem;padding:7px 14px;border-radius:20px;border:1px solid var(--line);background:none;color:var(--ink);cursor:pointer}
+.tab[aria-selected=true]{background:var(--bus);border-color:var(--bus);color:#1d2433;font-weight:700}
+#map{flex:1;min-height:200px}
+.panel{background:var(--card);padding:14px;border-top:1px solid var(--line);max-height:48vh;overflow:auto}
+.row{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.status{font-weight:700}
+.sub{color:var(--muted);font-size:.85rem}
+.pill{font-size:.78rem;padding:3px 10px;border-radius:12px;background:var(--bg);border:1px solid var(--line)}
+.pill.on{background:var(--ok);border-color:var(--ok);color:#fff}
+.pill.off{background:var(--bus);border-color:var(--bus);color:#1d2433}
+ul{list-style:none;margin:10px 0 0;padding:0}
+li{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
+li button{font:inherit;border:0;background:none;color:inherit;display:flex;justify-content:space-between;width:100%;padding:0;cursor:pointer}
+.go{width:100%;font:inherit;font-weight:700;padding:13px;border:0;border-radius:8px;background:var(--bus);color:#1d2433;cursor:pointer;margin-top:8px}
+.go.stop{background:#c8372d;color:#fff}
+.bus{font-size:26px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.4))}
+button:focus-visible{outline:3px solid var(--bus);outline-offset:2px}
+</style>
+</head>
+<body>
+<header>
+  <h1>School Bus Tracker</h1>
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" id="t-parent" aria-selected="true">Parent</button>
+    <button class="tab" role="tab" id="t-driver" aria-selected="false">Driver</button>
+  </div>
+</header>
+<div id="map"></div>
+<section class="panel" id="panel"></section>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// ===== SETTINGS: change these =====
+const FIREBASE_URL = ""; // e.g. "https://your-project-default-rtdb.firebaseio.com"  (empty = demo mode)
+const BUS_ID = "bus1";
+const SCHOOL = [12.6517, 77.2067];          // map start (Channapatna)
+const STUDENTS = ["Aarav", "Diya", "Rohan", "Meera", "Kiran"];
+// ==================================
+
+const STAGES = ["Waiting", "On bus", "Dropped"];
+const ROUTE = [[12.6517,77.2067],[12.6560,77.2120],[12.6610,77.2150],[12.6660,77.2110],[12.6700,77.2050],[12.6650,77.1990],[12.6580,77.2010],[12.6517,77.2067]];
+
+let role = "parent", watchId = null, demoStep = 0;
+let state = { lat: null, lng: null, ts: 0, students: Object.fromEntries(STUDENTS.map(n => [n, 0])) };
+
+const map = L.map("map").setView(SCHOOL, 14);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(map);
+L.marker(SCHOOL).addTo(map).bindPopup("School");
+const busMarker = L.marker(SCHOOL, { icon: L.divIcon({ html: '<span class="bus">🚌</span>', className: "", iconSize: [30, 30], iconAnchor: [15, 15] }) }).addTo(map);
+
+async function save() {
+  try {
+    if (FIREBASE_URL) await fetch(`${FIREBASE_URL}/buses/${BUS_ID}.json`, { method: "PUT", body: JSON.stringify(state) });
+    else localStorage.setItem("bus_" + BUS_ID, JSON.stringify(state));
+  } catch (e) { console.warn("save failed", e); }
+}
+async function load() {
+  try {
+    if (FIREBASE_URL) return await (await fetch(`${FIREBASE_URL}/buses/${BUS_ID}.json`)).json();
+    return JSON.parse(localStorage.getItem("bus_" + BUS_ID) || "null");
+  } catch (e) { return null; }
+}
+
+function setBus(lat, lng) { busMarker.setLatLng([lat, lng]); if (role === "parent") map.panTo([lat, lng], { animate: true }); }
+
+// ---------- Parent ----------
+async function refreshParent() {
+  if (role !== "parent") return;
+  const s = await load();
+  const live = s && s.lat && Date.now() - s.ts < 30000;
+  let note;
+  if (live) { state = { ...state, ...s, students: s.students || state.students }; setBus(s.lat, s.lng); note = `Live · updated ${Math.round((Date.now() - s.ts) / 1000)}s ago`; }
+  else { const p = ROUTE[demoStep++ % ROUTE.length]; setBus(p[0], p[1]); note = "Demo mode · no live bus right now"; }
+  renderParent(note, live);
+}
+function renderParent(note, live) {
+  document.getElementById("panel").innerHTML = `
+    <div class="row"><span class="status">Bus 1 · Route A</span><span class="pill ${live ? "on" : ""}">${live ? "Live" : "Demo"}</span></div>
+    <div class="sub">${note}</div>
+    <ul>${STUDENTS.map(n => `<li><span>${n}</span><span class="pill ${state.students[n] === 1 ? "on" : state.students[n] === 2 ? "" : "off"}">${STAGES[state.students[n] || 0]}</span></li>`).join("")}</ul>`;
+}
+
+// ---------- Driver ----------
+function renderDriver() {
+  const sharing = watchId !== null;
+  document.getElementById("panel").innerHTML = `
+    <div class="row"><span class="status">Driver controls</span><span class="pill ${sharing ? "on" : ""}">${sharing ? "Sharing location" : "Not sharing"}</span></div>
+    <div class="sub">Tap a student to move them: Waiting → On bus → Dropped.</div>
+    <button class="go ${sharing ? "stop" : ""}" id="share">${sharing ? "Stop sharing location" : "Start sharing location"}</button>
+    <ul>${STUDENTS.map(n => `<li><button data-n="${n}"><span>${n}</span><span class="pill ${state.students[n] === 1 ? "on" : state.students[n] === 2 ? "" : "off"}">${STAGES[state.students[n] || 0]}</span></button></li>`).join("")}</ul>`;
+  document.getElementById("share").onclick = toggleShare;
+  document.querySelectorAll("li button").forEach(b => b.onclick = () => { state.students[b.dataset.n] = ((state.students[b.dataset.n] || 0) + 1) % 3; save(); renderDriver(); });
+}
+function toggleShare() {
+  if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; return renderDriver(); }
+  if (!navigator.geolocation) return alert("This device does not support GPS.");
+  watchId = navigator.geolocation.watchPosition(p => {
+    state.lat = p.coords.latitude; state.lng = p.coords.longitude; state.ts = Date.now();
+    setBus(state.lat, state.lng); map.setView([state.lat, state.lng], 16); save();
+  }, err => { alert("Location blocked. Allow location access and try again."); watchId = null; renderDriver(); }, { enableHighAccuracy: true });
+  renderDriver();
+}
+
+// ---------- Tabs ----------
+function setRole(r) {
+  role = r;
+  document.getElementById("t-parent").setAttribute("aria-selected", r === "parent");
+  document.getElementById("t-driver").setAttribute("aria-selected", r === "driver");
+  r === "parent" ? refreshParent() : renderDriver();
+}
+document.getElementById("t-parent").onclick = () => setRole("parent");
+document.getElementById("t-driver").onclick = () => setRole("driver");
+
+setInterval(refreshParent, 3000);
+setRole("parent");
+</script>
+</body>
+</html>
